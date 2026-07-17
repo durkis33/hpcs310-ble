@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+.uv/
+.DS_Store
+.devcontainer/
+*.apk
+test-images/
