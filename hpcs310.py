@@ -85,7 +85,7 @@ CMD_STATE  = bytes([0x8C, 0x03])
 CMD_RESULT = bytes([0x8C, 0x13, 0x31])
 CMD_STOP   = bytes([0x8C, 0x25])
 CMD_HEART  = bytes([0x8C, 0xED])
-CMD_FLICK_SPEED = bytes([0x8C, 0x3D])
+CMD_FLICK_SPEED = bytes([0x8C, 0x3D])\nCMD_FLICK_GEAR_AUTO = bytes([0x8C, 0x37, 0x01])\nCMD_FLICK_RATE_AUTO = bytes([0x8C, 0x41, 0x01])
 CMD_FLICK_START = bytes([0x8C, 0x0E, 0x03])
 CMD_FLICK_STATE = bytes([0x8C, 0x3B])
 CMD_FLICK_PARAMS = bytes([0x8C, 0x3C])
@@ -755,7 +755,7 @@ async def _measure(address, use_lx=False, outdir=None, no_plot=False, confirm=Fa
                 pass
 
 
-async def _flicker(address, outdir=None):
+async def _flicker(address, outdir=None, auto_settings=False):
     """Acquire dedicated HPCS flicker metrics + 400-sample temporal waveform."""
     from bleak import BleakClient
 
@@ -855,7 +855,7 @@ async def _flicker(address, outdir=None):
                 "device": info,
                 "address": address,
                 "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "sampling_speed_index": speed_index,
+                "automatic_settings_requested": auto_settings,\n                "sampling_speed_index": speed_index,
                 "sampling_speed_value": speed_value,
                 "metrics": {
                     "frequency_hz": freq,
@@ -948,7 +948,7 @@ def main(argv=None):
 
     fli = sub.add_parser("flicker", parents=[parent], help="acquire flicker metrics and temporal waveform")
     fli.add_argument("--address", help="BLE MAC/address (default: first HPCS* found)")
-    fli.add_argument("--out", help="output folder")
+    fli.add_argument("--out", help="output folder")\n    fli.add_argument("--auto", action="store_true",\n                     help="enable the official app automatic gear and sample-rate settings before capture")
 
     m = sub.add_parser("measure", parents=[parent],
                        help="connect, measure, dump a full result folder")
@@ -983,7 +983,7 @@ def main(argv=None):
         return asyncio.run(_measure(args.address, args.lx, args.out,
                                     args.no_plot, args.confirm)) or 0
     if args.cmd == "flicker":
-        return asyncio.run(_flicker(args.address, args.out)) or 0
+        return asyncio.run(_flicker(args.address, args.out, args.auto)) or 0
     if args.cmd == "quality":
         out, payload = write_derived_metrics(args.measurement, args.out, args.ssi_reference)
         dm = payload["derived_metrics"]
