@@ -85,6 +85,12 @@ CMD_STATE  = bytes([0x8C, 0x03])
 CMD_RESULT = bytes([0x8C, 0x13, 0x31])
 CMD_STOP   = bytes([0x8C, 0x25])
 CMD_HEART  = bytes([0x8C, 0xED])
+CMD_FLICK_SPEED = bytes([0x8C, 0x3D])
+CMD_FLICK_START = bytes([0x8C, 0x0E, 0x03])
+CMD_FLICK_STATE = bytes([0x8C, 0x3B])
+CMD_FLICK_PARAMS = bytes([0x8C, 0x3C])
+CMD_FLICK_WAVE = bytes([0x8C, 0x3A])
+FLICK_SPEEDS = [100000, 50000, 20000, 10000, 5000, 2000, 1000, 500, 200, 100, 50]
 
 N_SPECTRUM = 671          # fixed spectral buffer length (float32 each)
 SPEC_BYTES = N_SPECTRUM * 4       # 2684
@@ -127,7 +133,11 @@ _METRICS = {
         "IntegTime0","VPeak","VDark","VDarkDAC"],
     1: ["fPAR","fPPFD","fPPFD_UV","fPPFD_B","fPPFD_G","fPPFD_R","fPPFD_FR",
         "fPPFD_IR","fKppfv","fPPFD_RB","fYPFD","fEch_A","fEch_B","fDLI","fCLI",
-        "fLx","fEfc","cct","duv","x","y","u","v","u2","v2","fSDCM","Ra"],  # (partial tail)
+        "fLx","fEfc","cct","duv","x","y","u","v","u2","v2","fSDCM","Ra"]
+        + [f"R{i}" for i in range(1, 16)]
+        + ["F","fSP","DominantWave","Purity","HlafWidth","PeakWave","CentreWave",
+           "CentroidWave","fRraito","fGraito","fBraito","fFreq","fPF","fPI","fDC","fFC",
+           "IntegTime0","VPeak","VDark","VDarkDAC"],
 }
 # default (type 0 and unknown) layout. The app's analysisSepc `else` branch adds
 # four fields only when the firmware version > 2005, then the trailing signal
@@ -633,6 +643,129 @@ async def _measure(address, use_lx=False, outdir=None, no_plot=False, confirm=Fa
                 pass
 
 
+async def _flicker(address, outdir=None):
+    """Acquire dedicated HPCS flicker metrics + 400-sample temporal waveform."""
+    from bleak import BleakClient
+
+    if not address:
+        hits = await _scan()
+        if not hits:
+            print("no HPCS device found", file=sys.stderr)
+            return 2
+        address = hits[0].address
+        print(f"connecting {address}")
+
+    rx = _Rx()
+    async with BleakClient(address, timeout=20.0) as client:
+        await client.start_notify(CHAR_UUID, rx.on_notify)
+
+        async def send(frame):
+            vlog(f"TX      {_hex(frame)}")
+            await client.write_gatt_char(CHAR_UUID, frame, response=False)
+
+        async def wait_prefix(prefix, timeout=3.0):
+            end = asyncio.get_event_loop().time() + timeout
+            while asyncio.get_event_loop().time() < end:
+                c = await rx.next_chunk(end - asyncio.get_event_loop().time())
+                if c and c.startswith(prefix):
+                    return c
+            return None
+
+        try:
+            # Device identity.
+            rx.reset(); await send(CMD_INFO)
+            info_frame = await wait_prefix(b"\x8c\xee")
+            info = decode_info(info_frame) if info_frame else {
+                "name":"", "sn":None, "iVer":0, "battery":None, "type":0}
+            print(f"device : {info['name']}  sn={info['sn']}  fw={info['iVer']}")
+
+            # Sampling-speed index used by the official Android app.
+            rx.reset(); await send(CMD_FLICK_SPEED)
+            speed_frame = await wait_prefix(b"\x8c\x3d")
+            speed_index = speed_frame[2] if speed_frame and len(speed_frame) >= 3 else None
+            speed_value = (FLICK_SPEEDS[speed_index]
+                           if speed_index is not None and speed_index < len(FLICK_SPEEDS)
+                           else None)
+
+            # Dedicated flicker acquisition.
+            rx.reset(); await send(CMD_FLICK_START)
+            await wait_prefix(b"\x8c\x0e")
+            ready = False
+            for _ in range(200):
+                rx.reset(); await send(CMD_FLICK_STATE)
+                st = await wait_prefix(b"\x8c\x3b", 1.0)
+                if st and len(st) >= 3 and st[2] == 1:
+                    ready = True
+                    break
+                await asyncio.sleep(0.1)
+            if not ready:
+                print("flicker sample never became ready", file=sys.stderr)
+                return 3
+
+            # Calculated parameters: four LE float32 values after 8C 3C.
+            rx.reset(); await send(CMD_FLICK_PARAMS)
+            params = await wait_prefix(b"\x8c\x3c")
+            if not params or len(params) < 18:
+                print("incomplete flicker parameter response", file=sys.stderr)
+                return 4
+            freq, percent, index, cycle_ms = struct.unpack_from("<4f", params, 2)
+
+            # Waveform: 8C 3A + 400 uint16 LE samples = 802 bytes.
+            rx.reset(); await send(CMD_FLICK_WAVE)
+            wave = b""
+            end = asyncio.get_event_loop().time() + 8.0
+            while len(wave) < 802 and asyncio.get_event_loop().time() < end:
+                c = await rx.next_chunk(min(2.0, end - asyncio.get_event_loop().time()))
+                if not c:
+                    break
+                if not wave:
+                    if not c.startswith(b"\x8c\x3a"):
+                        continue
+                wave += c
+            if len(wave) < 802:
+                print(f"incomplete flicker waveform: got {len(wave)} of 802 bytes",
+                      file=sys.stderr)
+                return 5
+            wave = wave[:802]
+            samples = list(struct.unpack_from("<400H", wave, 2))
+
+            folder = outdir or (
+                f"{_sanitize(info.get('name'))}_{info.get('sn') or 'unknown'}"
+                f"_flicker_{time.strftime('%Y%m%d-%H%M%S')}")
+            os.makedirs(folder, exist_ok=True)
+            open(os.path.join(folder, "flicker_params.bin"), "wb").write(params)
+            open(os.path.join(folder, "flicker_waveform.bin"), "wb").write(wave)
+            with open(os.path.join(folder, "flicker_waveform.csv"), "w") as f:
+                f.write("sample,value\n")
+                for i, value in enumerate(samples):
+                    f.write(f"{i},{value}\n")
+            record = {
+                "device": info,
+                "address": address,
+                "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "sampling_speed_index": speed_index,
+                "sampling_speed_value": speed_value,
+                "metrics": {
+                    "frequency_hz": freq,
+                    "flicker_percent": percent,
+                    "flicker_index": index,
+                    "flicker_cycle_ms": cycle_ms,
+                },
+                "waveform": {"sample_count": len(samples), "samples": samples},
+            }
+            with open(os.path.join(folder, "flicker.json"), "w") as f:
+                json.dump(record, f, indent=2)
+            print(f"flicker: {freq:.3f} Hz  {percent:.3f}%  "
+                  f"index={index:.5f}  cycle={cycle_ms:.3f} ms")
+            print(f"wrote flicker evidence -> {folder}/")
+            return 0
+        finally:
+            try:
+                await asyncio.shield(send(CMD_STOP))
+            except BaseException:
+                pass
+
+
 # ----------------------------------------------------------------------------
 # Self-test (no hardware): build a synthetic frame, round-trip the decoder.
 # ----------------------------------------------------------------------------
@@ -701,6 +834,10 @@ def main(argv=None):
 
     sub.add_parser("scan", parents=[parent], help="scan for HPCS* BLE devices")
 
+    fli = sub.add_parser("flicker", parents=[parent], help="acquire flicker metrics and temporal waveform")
+    fli.add_argument("--address", help="BLE MAC/address (default: first HPCS* found)")
+    fli.add_argument("--out", help="output folder")
+
     m = sub.add_parser("measure", parents=[parent],
                        help="connect, measure, dump a full result folder")
     m.add_argument("--address", help="BLE MAC/address (default: first HPCS* found)")
@@ -728,6 +865,8 @@ def main(argv=None):
     if args.cmd == "measure":
         return asyncio.run(_measure(args.address, args.lx, args.out,
                                     args.no_plot, args.confirm)) or 0
+    if args.cmd == "flicker":
+        return asyncio.run(_flicker(args.address, args.out)) or 0
     if args.cmd == "decode":
         buf = open(args.file, "rb").read()
         # a saved capture may or may not include the 4-byte header; require it
