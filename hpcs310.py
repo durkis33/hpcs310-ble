@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.9"
-# dependencies = ["bleak>=0.22", "matplotlib>=3.7", "numpy>=1.24"]
+# dependencies = ["bleak>=0.22", "matplotlib>=3.7", "numpy>=1.24", "colour-science>=0.4.7"]
 # ///
 """
 hpcs310.py - Read spectrum from a HopooColor HPCS-310 / HPCS-330 spectrometer
@@ -335,6 +335,118 @@ def write_outputs(folder, info, res, frame, integ_ms, address, make_plot=True):
             print(f"warning: could not render spectrum.png ({e})", file=sys.stderr)
 
     return written
+
+
+
+
+# ----------------------------------------------------------------------------
+# Standards-based derived light-quality metrics
+# ----------------------------------------------------------------------------
+def derive_quality_metrics(wavelengths, intensities):
+    """Calculate versioned quality metrics from the immutable measured SPD.
+
+    These values are software-derived, never instrument-reported. SSI is not
+    calculated here because it requires an explicit reference spectrum.
+    """
+    try:
+        import colour
+        from colour import SpectralDistribution
+        from colour.quality import colour_fidelity_index_ANSIIESTM3018
+    except ImportError as e:
+        raise RuntimeError(
+            "derived metrics require colour-science (pip install colour-science)"
+        ) from e
+
+    data = {float(w): max(0.0, float(v))
+            for w, v in zip(wavelengths, intensities)
+            if 380.0 <= float(w) <= 780.0}
+    if len(data) < 2:
+        raise ValueError("SPD does not contain enough data in 380-780 nm")
+
+    sd = SpectralDistribution(data, name="HPCS measured SPD")
+    tm30 = colour_fidelity_index_ANSIIESTM3018(sd, additional_data=True)
+    cqs = colour.colour_quality_scale(sd, method="NIST CQS 9.0")
+    tlci = colour.television_lighting_consistency_index(sd)
+
+    return {
+        "provenance": {
+            "source": "software-derived from stored HPCS SPD",
+            "library": "colour-science",
+            "library_version": getattr(colour, "__version__", None),
+            "input_range_nm": [min(data), max(data)],
+            "input_spacing_nm": 1.0,
+            "negative_values_clamped_to_zero": True,
+        },
+        "tm30_18": {
+            "Rf": float(tm30.R_f),
+            "Rg": float(tm30.R_g),
+            "CCT": float(tm30.CCT),
+            "Duv": float(tm30.D_uv),
+            "Rf_hue_bins": [float(x) for x in tm30.R_fs],
+            "chroma_shift_hue_bins": [float(x) for x in tm30.R_cs],
+            "hue_shift_hue_bins": [float(x) for x in tm30.R_hs],
+        },
+        "cqs_nist_9_0": float(cqs),
+        "tlci_2012": float(tlci),
+        "ssi": None,
+        "ssi_note": "Requires an explicit reference spectrum; use --ssi-reference.",
+    }
+
+
+def derive_ssi(wavelengths, intensities, reference_name):
+    """Calculate Academy SSI against an explicitly named built-in reference."""
+    try:
+        import colour
+        from colour import SpectralDistribution
+    except ImportError as e:
+        raise RuntimeError(
+            "SSI requires colour-science (pip install colour-science)"
+        ) from e
+    data = {float(w): max(0.0, float(v))
+            for w, v in zip(wavelengths, intensities)
+            if 380.0 <= float(w) <= 780.0}
+    sd = SpectralDistribution(data, name="HPCS measured SPD")
+    if reference_name not in colour.SDS_ILLUMINANTS:
+        raise ValueError(
+            f"unknown SSI reference {reference_name!r}; choose a Colour SDS_ILLUMINANTS key")
+    ref = colour.SDS_ILLUMINANTS[reference_name]
+    return {
+        "value": float(colour.spectral_similarity_index(sd, ref)),
+        "reference": reference_name,
+        "library": "colour-science",
+        "library_version": getattr(colour, "__version__", None),
+    }
+
+
+def load_measurement_spd(path):
+    with open(path, "r") as f:
+        record = json.load(f)
+    spectrum = record.get("spectrum") or {}
+    wl = spectrum.get("wavelength_nm")
+    iv = spectrum.get("intensity_uW_cm2_nm")
+    if not wl or not iv or len(wl) != len(iv):
+        raise ValueError("measurement JSON has no valid stored SPD")
+    return record, wl, iv
+
+
+def write_derived_metrics(measurement_path, out_path=None, ssi_reference=None):
+    record, wl, iv = load_measurement_spd(measurement_path)
+    derived = derive_quality_metrics(wl, iv)
+    if ssi_reference:
+        derived["ssi"] = derive_ssi(wl, iv, ssi_reference)
+        derived.pop("ssi_note", None)
+    payload = {
+        "source_measurement": os.path.basename(measurement_path),
+        "source_device": record.get("device"),
+        "source_captured_at": record.get("captured_at"),
+        "derived_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "derived_metrics": derived,
+    }
+    out_path = out_path or os.path.join(
+        os.path.dirname(measurement_path), "derived_metrics.json")
+    with open(out_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    return out_path, payload
 
 
 # ----------------------------------------------------------------------------
@@ -847,6 +959,11 @@ def main(argv=None):
     m.add_argument("--confirm", action="store_true",
                    help="connect, then wait for Enter before measuring")
 
+    q = sub.add_parser("quality", parents=[parent], help="derive TM-30, CQS and TLCI from a saved measurement")
+    q.add_argument("measurement", help="measurement.json containing stored SPD")
+    q.add_argument("--out", help="output JSON (default: derived_metrics.json beside measurement)")
+    q.add_argument("--ssi-reference", help="explicit Colour illuminant name for Academy SSI, e.g. D65")
+
     d = sub.add_parser("decode", parents=[parent],
                        help="decode a captured raw result frame from a file")
     d.add_argument("file")
@@ -867,6 +984,15 @@ def main(argv=None):
                                     args.no_plot, args.confirm)) or 0
     if args.cmd == "flicker":
         return asyncio.run(_flicker(args.address, args.out)) or 0
+    if args.cmd == "quality":
+        out, payload = write_derived_metrics(args.measurement, args.out, args.ssi_reference)
+        dm = payload["derived_metrics"]
+        print(f"TM-30-18: Rf={dm['tm30_18']['Rf']:.2f}  Rg={dm['tm30_18']['Rg']:.2f}")
+        print(f"CQS 9.0: {dm['cqs_nist_9_0']:.2f}  TLCI-2012: {dm['tlci_2012']:.2f}")
+        if dm.get("ssi"):
+            print(f"SSI vs {dm['ssi']['reference']}: {dm['ssi']['value']:.1f}")
+        print(f"wrote {out}")
+        return 0
     if args.cmd == "decode":
         buf = open(args.file, "rb").read()
         # a saved capture may or may not include the 4-byte header; require it
