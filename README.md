@@ -77,6 +77,13 @@ Tested with the HPCS-310. All HPCS-310/330 variants (P/PAR, UV, IR, PR, C)
 use the same protocol and are decoded with their model-specific metric sets;
 reports welcome.
 
+## General PowerShell service
+
+See [powershell-service](powershell-service/README.md) for a standalone Windows
+execution service, local lifecycle scripts, authenticated JSON API, audit log,
+and GPT Actions connector usable outside Codex/Work mode. HPCS is its first
+integration example; the service has no project-specific dependencies.
+
 ## License
 
 MIT

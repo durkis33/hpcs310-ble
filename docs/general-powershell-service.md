@@ -1,6 +1,8 @@
 # General GPT-to-PowerShell Local Service
 
-Status: design task for Codex
+Status: implemented in [powershell-service](../powershell-service/README.md).
+See its [audit and validation notes](../powershell-service/AUDIT.md) for tested
+behavior and remaining deployment/hardware checks.
 
 ## Purpose
 
