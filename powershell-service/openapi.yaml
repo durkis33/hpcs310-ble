@@ -30,6 +30,28 @@ paths:
       responses:
         '202':
           description: Job accepted
+  /exec-script:
+    post:
+      operationId: execScript
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: {type: string}
+                args:
+                  type: array
+                  items: {type: string}
+                cwd: {type: string}
+                timeout_seconds: {type: integer}
+      responses:
+        '202':
+          description: Job accepted
   /jobs/{job_id}:
     get:
       operationId: getJob
@@ -43,6 +65,19 @@ paths:
       responses:
         '200':
           description: Job result
+  /jobs/{job_id}/cancel:
+    post:
+      operationId: cancelJob
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Cancellation result
   /read-file:
     post:
       operationId: readFile
