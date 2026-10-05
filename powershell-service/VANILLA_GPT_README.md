@@ -17,20 +17,22 @@ HTTPS address is the bridge between the GPT and your computer.
 
 ## 1. Install the local service
 
-Open an ordinary PowerShell window on the Windows PC. Do not run it as
-Administrator. In the `powershell-service` folder, run:
+Open an ordinary Command Prompt or PowerShell window on the Windows PC. Do not
+run it as Administrator. In the `powershell-service` folder, run:
 
-```powershell
-.\Install.ps1 -Python 'C:\Path\To\python.exe' -AllowedRoots 'C:\Projects'
-& "$env:LOCALAPPDATA\PowerShellService\Start.ps1"
+```cmd
+Install.cmd "C:\Path\To\python.exe" "C:\Projects"
+"%LOCALAPPDATA%\PowerShellService\Start.cmd"
 ```
 
 Replace `C:\Path\To\python.exe` with your installed Python executable. Replace
 `C:\Projects` with the folders the GPT may work in. The service can only accept
 a working directory or a PowerShell script from one of these folders.
 
-You should see `Service ready on port 8765`. To check it later, run the same
-`Start.ps1` command; it reports that it is already running if so.
+You should see `Service started`. To check it later, run the same `Start.cmd`
+command; it reports that it is already running if so. The Windows Startup folder
+also starts it at your next sign-in. These lifecycle commands never run a
+PowerShell script or alter the PowerShell execution policy.
 
 The installation creates two secret files:
 
@@ -97,7 +99,7 @@ its absolute Windows working directory, and its expected effect. Then call exec
 or exec_script with an explicit absolute cwd and an appropriate timeout.
 
 When the service returns pending_approval, tell the user this exact message:
-"Open PowerShell on your PC and run: & \"$env:LOCALAPPDATA\PowerShellService\Approve.ps1\" -JobId <job ID>"
+"Open Command Prompt or PowerShell on your PC and run: \"%LOCALAPPDATA%\PowerShellService\Approve.cmd\" <job ID>"
 Replace <job ID> with the returned job_id. Do not claim the command has run yet.
 Never ask for, reveal, store, or use an approval token.
 
@@ -120,8 +122,8 @@ explicit request. The service is not a security sandbox; do not imply otherwise.
 
 When the GPT reports a pending job, open PowerShell on the PC and run:
 
-```powershell
-& "$env:LOCALAPPDATA\PowerShellService\Approve.ps1" -JobId 'PASTE-THE-JOB-ID-HERE'
+```cmd
+"%LOCALAPPDATA%\PowerShellService\Approve.cmd" PASTE-THE-JOB-ID-HERE
 ```
 
 The script prints the exact command, folder, timeout, and script hash when
@@ -145,8 +147,8 @@ List the files in C:\Projects\example.
 The GPT submits the request, you approve it locally, and the GPT returns the
 result. To stop the service when you are done:
 
-```powershell
-& "$env:LOCALAPPDATA\PowerShellService\Stop.ps1"
+```cmd
+"%LOCALAPPDATA%\PowerShellService\Stop.cmd"
 ```
 
 ## If something goes wrong
