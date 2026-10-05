@@ -6,6 +6,9 @@ Requires Windows, Python 3.9+ and Windows PowerShell 5.1 (or a configured PowerS
 another repository without changing its implementation. No Codex, Work mode,
 OpenAI SDK, or HPCS dependency is required.
 
+For an ordinary ChatGPT custom GPT setup, including copy-and-paste GPT
+instructions, see [VANILLA_GPT_README.md](VANILLA_GPT_README.md).
+
 ## Install and operate outside Work mode
 
 From an ordinary, **non-administrator** PowerShell terminal:
