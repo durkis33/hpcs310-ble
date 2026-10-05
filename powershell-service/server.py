@@ -48,26 +48,34 @@ def allowed(command):
 
 def run_job(job_id, argv, cwd, timeout_s, display):
     started = time.time()
+    proc = None
     with LOCK:
         JOBS[job_id]["status"] = "running"
     try:
-        cp = subprocess.run(
-            argv, cwd=cwd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=timeout_s
+        proc = subprocess.Popen(
+            argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace"
         )
-        result = {
-            "status": "completed",
-            "stdout": cp.stdout,
-            "stderr": cp.stderr,
-            "exit_code": cp.returncode,
-        }
-    except subprocess.TimeoutExpired as e:
-        result = {
-            "status": "timed_out",
-            "stdout": e.stdout or "",
-            "stderr": e.stderr or "",
-            "exit_code": None,
-        }
+        with LOCK:
+            JOBS[job_id]["pid"] = proc.pid
+            JOBS[job_id]["process"] = proc
+        try:
+            out, err = proc.communicate(timeout=timeout_s)
+            result = {
+                "status": "completed",
+                "stdout": out,
+                "stderr": err,
+                "exit_code": proc.returncode,
+            }
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = proc.communicate()
+            result = {
+                "status": "timed_out",
+                "stdout": out,
+                "stderr": err,
+                "exit_code": proc.returncode,
+            }
     except Exception as e:
         result = {"status":"failed","stdout":"","stderr":str(e),"exit_code":None}
     result.update({
@@ -79,6 +87,7 @@ def run_job(job_id, argv, cwd, timeout_s, display):
     })
     with LOCK:
         JOBS[job_id].update(result)
+        JOBS[job_id].pop("process", None)
     audit({"event":"job_finished", **result})
 
 def launch(argv, cwd, timeout_s, display):
@@ -144,6 +153,30 @@ class Handler(BaseHTTPRequestHandler):
             timeout_s = min(int(body.get("timeout_seconds",120)), int(CONFIG.get("max_timeout_seconds",1800)))
             ps = CONFIG.get("powershell_executable","powershell.exe")
             return self.send_json(202, launch([ps,"-NoProfile","-NonInteractive","-Command",command],cwd,timeout_s,command))
+
+        if path == "/exec-script":
+            script = Path(body.get("path","")).expanduser().resolve()
+            args = [str(x) for x in body.get("args",[])]
+            display = " ".join([str(script), *args])
+            ok, why = allowed(display)
+            if not ok:
+                return self.send_json(403, {"error":why})
+            cwd = Path(body.get("cwd") or script.parent).expanduser().resolve()
+            timeout_s = min(int(body.get("timeout_seconds",120)), int(CONFIG.get("max_timeout_seconds",1800)))
+            return self.send_json(202, launch([str(script), *args],cwd,timeout_s,display))
+
+        if path.startswith("/jobs/") and path.endswith("/cancel"):
+            job_id = path.split("/")[-2]
+            with LOCK:
+                rec = JOBS.get(job_id)
+                proc = rec.get("process") if rec else None
+            if not rec:
+                return self.send_json(404, {"error":"job_not_found"})
+            if proc and proc.poll() is None:
+                proc.kill()
+                audit({"event":"job_cancelled","job_id":job_id})
+                return self.send_json(200, {"job_id":job_id,"cancelled":True})
+            return self.send_json(200, {"job_id":job_id,"cancelled":False})
 
         if path == "/read-file":
             p = Path(body.get("path","")).expanduser().resolve()
