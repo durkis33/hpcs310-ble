@@ -1,0 +1,84 @@
+openapi: 3.1.0
+info:
+  title: Local PowerShell Service
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:8765
+paths:
+  /status:
+    get:
+      operationId: status
+      responses:
+        '200':
+          description: Service status
+  /exec:
+    post:
+      operationId: exec
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [command]
+              properties:
+                command: {type: string}
+                cwd: {type: string}
+                timeout_seconds: {type: integer}
+      responses:
+        '202':
+          description: Job accepted
+  /jobs/{job_id}:
+    get:
+      operationId: getJob
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Job result
+  /read-file:
+    post:
+      operationId: readFile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: {type: string}
+      responses:
+        '200':
+          description: UTF-8 text file
+  /list-files:
+    post:
+      operationId: listFiles
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: {type: string}
+      responses:
+        '200':
+          description: Directory listing
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
