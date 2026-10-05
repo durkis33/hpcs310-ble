@@ -59,6 +59,7 @@ import struct
 import sys
 import time
 
+__version__ = "0.2.1"
 VERBOSE = False
 
 
@@ -85,7 +86,9 @@ CMD_STATE  = bytes([0x8C, 0x03])
 CMD_RESULT = bytes([0x8C, 0x13, 0x31])
 CMD_STOP   = bytes([0x8C, 0x25])
 CMD_HEART  = bytes([0x8C, 0xED])
-CMD_FLICK_SPEED = bytes([0x8C, 0x3D])\nCMD_FLICK_GEAR_AUTO = bytes([0x8C, 0x37, 0x01])\nCMD_FLICK_RATE_AUTO = bytes([0x8C, 0x41, 0x01])
+CMD_FLICK_SPEED = bytes([0x8C, 0x3D])
+CMD_FLICK_GEAR_AUTO = bytes([0x8C, 0x37, 0x01])
+CMD_FLICK_RATE_AUTO = bytes([0x8C, 0x41, 0x01])
 CMD_FLICK_START = bytes([0x8C, 0x0E, 0x03])
 CMD_FLICK_STATE = bytes([0x8C, 0x3B])
 CMD_FLICK_PARAMS = bytes([0x8C, 0x3C])
@@ -791,6 +794,13 @@ async def _flicker(address, outdir=None, auto_settings=False):
                 "name":"", "sn":None, "iVer":0, "battery":None, "type":0}
             print(f"device : {info['name']}  sn={info['sn']}  fw={info['iVer']}")
 
+            # Match the manufacturer app's automatic flicker settings when requested.
+            if auto_settings:
+                rx.reset(); await send(CMD_FLICK_GEAR_AUTO)
+                await asyncio.sleep(0.15)
+                rx.reset(); await send(CMD_FLICK_RATE_AUTO)
+                await asyncio.sleep(0.15)
+
             # Sampling-speed index used by the official Android app.
             rx.reset(); await send(CMD_FLICK_SPEED)
             speed_frame = await wait_prefix(b"\x8c\x3d")
@@ -855,7 +865,8 @@ async def _flicker(address, outdir=None, auto_settings=False):
                 "device": info,
                 "address": address,
                 "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "automatic_settings_requested": auto_settings,\n                "sampling_speed_index": speed_index,
+                "automatic_settings_requested": auto_settings,
+                "sampling_speed_index": speed_index,
                 "sampling_speed_value": speed_value,
                 "metrics": {
                     "frequency_hz": freq,
@@ -942,13 +953,16 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser(description="HopooColor HPCS-310/330 BLE spectrum reader",
                                  parents=[parent])
+    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("scan", parents=[parent], help="scan for HPCS* BLE devices")
 
     fli = sub.add_parser("flicker", parents=[parent], help="acquire flicker metrics and temporal waveform")
     fli.add_argument("--address", help="BLE MAC/address (default: first HPCS* found)")
-    fli.add_argument("--out", help="output folder")\n    fli.add_argument("--auto", action="store_true",\n                     help="enable the official app automatic gear and sample-rate settings before capture")
+    fli.add_argument("--out", help="output folder")
+    fli.add_argument("--auto", action="store_true",
+                     help="enable the official app automatic gear and sample-rate settings before capture")
 
     m = sub.add_parser("measure", parents=[parent],
                        help="connect, measure, dump a full result folder")
