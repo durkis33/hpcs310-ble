@@ -157,7 +157,7 @@ result. To stop the service when you are done:
 | --- | --- |
 | The GPT says it cannot reach the service | Ensure the service is started, then check that the HTTPS bridge is running and points to `127.0.0.1:8765`. |
 | The request is unauthorized | Re-copy the contents of `state\api.token` into the GPT Action authentication setting. Do not use the approval token. |
-| The request is pending approval | Run `Approve.ps1` locally with the returned job ID. |
+| The request is pending approval | Run `Approve.cmd` locally with the returned job ID. |
 | A path is rejected | Use an existing absolute Windows path inside `allowed_roots`; update `config.json` while stopped if needed, then restart. |
 | A command fails | Ask the GPT to report stderr and the exit code. The audit log is at `state\audit.jsonl`. |
 
