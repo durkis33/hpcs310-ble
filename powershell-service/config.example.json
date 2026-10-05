@@ -16,5 +16,7 @@
     "(?i)\\bstop-computer\\b",
     "(?i)\\brestart-computer\\b",
     "(?i)\\bshutdown\\b"
-  ]
+  ],
+  "python_executable": "python",
+  "allow_patterns": []
 }
