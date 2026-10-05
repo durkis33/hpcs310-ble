@@ -14,6 +14,7 @@ certification or evidence of a deployed ChatGPT connection.
 | HTTP server could allocate unlimited handler threads | Cap at 16, with socket read timeouts | Source review; no load certification |
 | A cancelled job could be released through the launch gate | Recheck cancellation before launch and before releasing stdin | Cancellation test |
 | Completion audit reported the pre-completion state | Record the terminal state with results | Audit inspection |
+| CI temporary paths used Windows 8.3 aliases while the service returned canonical paths | Resolve the test fixture root before comparing paths | Windows CI regression |
 
 ## Verified locally on Windows
 
@@ -55,5 +56,6 @@ certification or evidence of a deployed ChatGPT connection.
 - Windows Job Objects contain ordinary descendants, not work delegated to
   pre-existing services. Changed-file reporting is capped, best-effort and
   excludes deletion tracking. Pending/results are memory-only across restart.
-- Automated tests used the local Python runtime and Windows PowerShell 5.1;
-  the supplied Windows CI workflow targets Python 3.9 but has not yet run here.
+- Automated tests used the local Python runtime and Windows PowerShell 5.1.
+  The supplied Windows CI workflow also targets Python 3.9. Its first run exposed
+  the fixture path-alias issue fixed above; consult the PR checks for final status.

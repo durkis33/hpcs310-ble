@@ -21,7 +21,7 @@ class ServiceTests(unittest.TestCase):
         self.old_policy = os.environ.get('PSExecutionPolicyPreference')
         os.environ['PSExecutionPolicyPreference'] = 'RemoteSigned'
         self.tmp = tempfile.TemporaryDirectory(prefix='service test ')
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.project = self.root / 'project with spaces'
         self.project.mkdir()
         for name, token in [('api', 'a' * 40), ('admin', 'b' * 40)]:
