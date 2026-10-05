@@ -163,7 +163,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(403, {"error":why})
             cwd = Path(body.get("cwd") or script.parent).expanduser().resolve()
             timeout_s = min(int(body.get("timeout_seconds",120)), int(CONFIG.get("max_timeout_seconds",1800)))
-            return self.send_json(202, launch([str(script), *args],cwd,timeout_s,display))
+            if script.suffix.lower() == ".ps1":
+                ps = CONFIG.get("powershell_executable","powershell.exe")
+                argv = [ps, "-NoProfile", "-NonInteractive", "-File", str(script), *args]
+            elif script.suffix.lower() == ".py":
+                argv = [CONFIG.get("python_executable","python"), str(script), *args]
+            else:
+                argv = [str(script), *args]
+            return self.send_json(202, launch(argv,cwd,timeout_s,display))
 
         if path.startswith("/jobs/") and path.endswith("/cancel"):
             job_id = path.split("/")[-2]
