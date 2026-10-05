@@ -1,0 +1,20 @@
+{
+  "bind_host": "127.0.0.1",
+  "port": 8765,
+  "auth_token": "REPLACE_ME",
+  "powershell_executable": "powershell.exe",
+  "default_timeout_seconds": 120,
+  "max_timeout_seconds": 1800,
+  "audit_log": "logs/audit.jsonl",
+  "deny_patterns": [
+    "(?i)\\bformat\\s+[a-z]:",
+    "(?i)\\bclear-disk\\b",
+    "(?i)\\bremove-item\\b.*-recurse.*-force"
+  ],
+  "confirm_patterns": [
+    "(?i)\\bremove-item\\b",
+    "(?i)\\bstop-computer\\b",
+    "(?i)\\brestart-computer\\b",
+    "(?i)\\bshutdown\\b"
+  ]
+}
