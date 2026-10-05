@@ -34,15 +34,27 @@ certification or evidence of a deployed ChatGPT connection.
   The Python launcher was unavailable, so an explicit Python executable was used.
 - Test service stopped after validation. PowerShell lifecycle scripts parsed
   without syntax errors.
+- The PowerShell lifecycle scripts have since been replaced by native `.cmd`
+  entry points. The actual Python host path was exercised on this Windows machine:
+  start returned a healthy status response, restart completed a graceful stop and
+  a second healthy start, and a final graceful stop succeeded. The Startup-folder
+  entry itself is created only by a user's `Install.cmd`; the sandbox account was
+  correctly denied write access to that user's protected Startup folder.
 
 ## Remaining boundaries and deployment checks
+
+- Lifecycle entry points are now `Install.cmd`, `Start.cmd`, `Stop.cmd`,
+  `Restart.cmd`, and `Approve.cmd`. They use Python and a command launcher in
+  the current user's Windows Startup folder; PowerShell execution policy is
+  neither read nor changed. The service starts on the next user sign-in but does
+  not provide a crash-restart supervisor while the user remains signed in.
 
 - Live BLE acquisition is **not validated**: install HPCS's BLE dependency in the
   chosen project Python environment and repeat with a reachable spectrometer.
 - GPT Actions schema and connector are supplied; no public HTTPS gateway,
   custom GPT, or live ChatGPT end-to-end connection was provisioned or verified.
-- Optional Task Scheduler registration is implemented but not exercised here.
-  This is a per-user background service, not a Windows SCM service.
+- This is a per-user background service, not a Windows SCM service. Startup is
+  at the next interactive sign-in; it is not available before the user signs in.
 - No elevation API is provided. Use a non-administrator account. Arbitrary
   approved code has that account's privileges; regex and allowed_roots are not
   an execution sandbox. The approval token is independent, but code already
