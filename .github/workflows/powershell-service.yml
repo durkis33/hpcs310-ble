@@ -1,0 +1,20 @@
+name: PowerShell service
+on:
+  push:
+    paths: ['powershell-service/**', '.github/workflows/powershell-service.yml', 'hpcs310.py']
+  pull_request:
+    paths: ['powershell-service/**', '.github/workflows/powershell-service.yml', 'hpcs310.py']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: python -m unittest discover -s powershell-service/tests -v
+      - run: |
+          python powershell-service/build_contract.py
+          git diff --exit-code -- powershell-service/openapi.json

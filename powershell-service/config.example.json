@@ -1,0 +1,18 @@
+{
+  "host": "127.0.0.1",
+  "port": 8765,
+  "powershell": "powershell.exe",
+  "allowed_roots": ["C:\\Projects"],
+  "token_file": "C:\\Users\\YOUR_USER\\AppData\\Local\\PowerShellService\\state\\api.token",
+  "approval_token_file": "C:\\Users\\YOUR_USER\\AppData\\Local\\PowerShellService\\state\\approval.token",
+  "audit_file": "C:\\Users\\YOUR_USER\\AppData\\Local\\PowerShellService\\state\\audit.jsonl",
+  "execution_policy": "confirm",
+  "deny_patterns": ["(?i)Format-Volume", "(?i)Clear-Disk"],
+  "confirm_patterns": ["(?i)Remove-Item", "(?i)Stop-Computer"],
+  "max_timeout": 300,
+  "max_running": 4,
+  "max_jobs": 100,
+  "max_output_bytes": 1048576,
+  "max_file_bytes": 1048576,
+  "max_snapshot_files": 5000
+}
