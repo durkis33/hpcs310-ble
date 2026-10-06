@@ -49,9 +49,25 @@ uv run hpcs310.py measure                    # measure -> auto folder device_SN_
 uv run hpcs310.py measure --address AA:BB:CC:DD:EE:FF --out run1
 uv run hpcs310.py measure --confirm          # connect, wait for Enter, then measure
 uv run hpcs310.py measure --no-plot          # skip the PNG
+uv run hpcs310.py flicker --address AA:BB:CC:DD:EE:FF --out flicker-run
+uv run hpcs310.py flicker --auto --continuous # Auto rate; FW >= 2007 required
+uv run hpcs006_gain.py --address AA:BB:CC:DD:EE:FF --out hpcs006-run
 uv run hpcs310.py decode frame.bin --csv spec.csv   # re-decode a saved raw frame
 uv run hpcs310.py selftest                   # verify the decoder, no hardware needed
 ```
+
+## Flicker work
+
+The HPCS-005 adaptive `flicker` command begins with Auto gain, examines both
+the fixed 400-point `8C3A` waveform and `8C3C` metrics, then safely tries
+manual ×10, ×100, and ×1000 only when the waveform is viable and has estimated
+headroom. It checkpoints raw `8C3A`/`8C3C` responses, all waveform samples,
+configuration readbacks, diagnostics, and every accept/reject/retry decision.
+
+`hpcs006_gain.py` is a separate HPCS-006 characterisation runner. It records
+manual ×1/×10/×100/×1000 at index 07 (20 kHz, 500 ms) without changing the
+HPCS-005 acceptance policy. See [the flicker protocol and experiment record](docs/hpcs-flicker.md)
+for the validated behavior and current limitations.
 
 `measure` connects to the first `HPCS*` device it finds (or `--address`),
 triggers one measurement, and writes a folder named

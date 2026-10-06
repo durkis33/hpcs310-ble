@@ -6,3 +6,8 @@ __pycache__/
 .devcontainer/
 *.apk
 test-images/
+
+# Raw HPCS flicker evidence is retained locally/externally, never versioned.
+HPCS-310P_*_flicker_*/
+HPCS_flicker_*/
+HPCS-006-physical-*/

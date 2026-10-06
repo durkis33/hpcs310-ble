@@ -58,6 +58,8 @@ import os
 import struct
 import sys
 import time
+import math
+import statistics
 
 __version__ = "0.2.1"
 VERBOSE = False
@@ -88,12 +90,18 @@ CMD_STOP   = bytes([0x8C, 0x25])
 CMD_HEART  = bytes([0x8C, 0xED])
 CMD_FLICK_SPEED = bytes([0x8C, 0x3D])
 CMD_FLICK_GEAR_AUTO = bytes([0x8C, 0x37, 0x01])
+CMD_FLICK_GEAR_MODE = bytes([0x8C, 0x38])
+CMD_FLICK_GEAR = bytes([0x8C, 0x36])
 CMD_FLICK_RATE_AUTO = bytes([0x8C, 0x41, 0x01])
+CMD_FLICK_RATE_MODE = bytes([0x8C, 0x3F])
 CMD_FLICK_START = bytes([0x8C, 0x0E, 0x03])
+CMD_FLICK_START_CONTINUOUS = bytes([0x8C, 0x0E, 0x04])
 CMD_FLICK_STATE = bytes([0x8C, 0x3B])
 CMD_FLICK_PARAMS = bytes([0x8C, 0x3C])
 CMD_FLICK_WAVE = bytes([0x8C, 0x3A])
-FLICK_SPEEDS = [100000, 50000, 20000, 10000, 5000, 2000, 1000, 500, 200, 100, 50]
+FLICK_WINDOW_MS = [100000, 50000, 20000, 10000, 5000, 2000, 1000, 500, 200, 100, 50]
+# APK windows imply 10,000 internal samples; that record is not exposed by 3A.
+FLICK_SAMPLE_RATES_HZ = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000]
 
 N_SPECTRUM = 671          # fixed spectral buffer length (float32 each)
 SPEC_BYTES = N_SPECTRUM * 4       # 2684
@@ -758,135 +766,319 @@ async def _measure(address, use_lx=False, outdir=None, no_plot=False, confirm=Fa
                 pass
 
 
-async def _flicker(address, outdir=None, auto_settings=False):
-    """Acquire dedicated HPCS flicker metrics + 400-sample temporal waveform."""
-    from bleak import BleakClient
+def flicker_sampling_metadata(index):
+    known = isinstance(index, int) and 0 <= index < len(FLICK_WINDOW_MS)
+    return {
+        "sampling_rate_index": index,
+        "sample_rate_hz": FLICK_SAMPLE_RATES_HZ[index] if known else None,
+        "acquisition_window_ms": FLICK_WINDOW_MS[index] if known else None,
+    }
 
+
+def flicker_waveform_diagnostics(samples):
+    # Conservative host policy, NOT a calibrated ADC clipping specification.
+    low, high = 16, int(65535 * 0.99)
+    result = {"sample_count": len(samples), "samples": samples,
+              "low_guard_counts": low, "high_guard_counts": high,
+              "threshold_basis": "conservative uint16 rail guards; uncalibrated"}
+    if not samples:
+        return dict(result, viable=False, saturated=False, reason="missing waveform")
+    minimum, maximum = min(samples), max(samples)
+    mean = statistics.mean(samples)
+    rail_count = sum(x <= low or x >= high for x in samples)
+    result.update(min=minimum, max=maximum, mean=mean,
+                  peak_to_peak=maximum-minimum, sd=statistics.pstdev(samples),
+                  rail_sample_count=rail_count, saturated=bool(rail_count),
+                  viable=len(samples) == 400 and not rail_count and maximum > minimum,
+                  reason="complete varying waveform" if len(samples) == 400 and not rail_count
+                  and maximum > minimum else "incomplete, flat, or rail-limited waveform")
+    return result
+
+
+def flicker_decision(metrics, waveform, actual_gain, requested_gain=None):
+    """Pure decision policy; zero metrics alone never authorize gain escalation."""
+    if waveform.get("saturated"):
+        return {"action": "reject", "reason": "waveform reached conservative rail guard"}
+    if not waveform.get("viable"):
+        return {"action": "reject", "reason": "waveform is not viable"}
+    if metrics is None or not all(math.isfinite(v) for v in metrics.values()):
+        return {"action": "reject", "reason": "missing or non-finite instrument metrics"}
+    freq, percent, index, cycle = (metrics[k] for k in
+        ("frequency_hz", "flicker_percent", "flicker_index", "flicker_cycle_ms"))
+    if freq > 0 and cycle > 0 and 0 <= percent <= 100 and 0 <= index <= 1 \
+            and abs(freq * cycle - 1000) <= 50:
+        return {"action": "accept", "reason": "valid instrument metrics with reciprocal frequency/period"}
+    if any(v != 0 for v in metrics.values()):
+        return {"action": "reject", "reason": "nonzero but inconsistent instrument metrics"}
+    # The gain register remains readable while Auto is enabled, but it is not a
+    # reliable statement of the active automatic gain (the physical run read 03
+    # in Auto). Begin manual fallback explicitly at x10, as the protocol plan
+    # requires, rather than falsely considering Auto exhausted at x1000.
+    if requested_gain is None:
+        candidates = [1]
+        base_gain = 1
+    elif actual_gain not in range(4):
+        return {"action": "reject", "reason": "unknown manual gain; cannot safely escalate"}
+    else:
+        candidates = [g for g in (1, 2, 3) if g > requested_gain]
+        base_gain = actual_gain
+    if not candidates:
+        return {"action": "reject", "reason": "zero metrics; no higher gain remains"}
+    gain = candidates[0]
+    factor = 10 ** (gain - base_gain)
+    # DC includes an unknown offset (~4000 in reference captures). Scale the AC
+    # excursion, not the whole count. This estimate cannot guarantee no clipping.
+    projected_low = waveform["mean"] - factor * (waveform["mean"] - waveform["min"])
+    projected_high = waveform["mean"] + factor * (waveform["max"] - waveform["mean"])
+    decision = {"next_gain_index": gain, "projected_min": projected_low,
+                "projected_max": projected_high,
+                "projection_basis": "AC excursion scaled by manual gain ratio around current mean; Auto register is diagnostic only; DC shift unknown"}
+    if projected_low <= waveform["low_guard_counts"] or projected_high >= waveform["high_guard_counts"]:
+        return dict(decision, action="reject", reason="insufficient estimated headroom for next gain")
+    return dict(decision, action="retry", reason="zero metrics with viable waveform and estimated headroom")
+
+
+def save_flicker_evidence(folder, record):
+    """Checkpoint all attempts, including partial/failed attempts, after each change."""
+    os.makedirs(folder, exist_ok=True)
+    for attempt in record["attempts"]:
+        destination = os.path.join(folder, "attempt_%02d" % attempt["number"])
+        os.makedirs(destination, exist_ok=True)
+        for key, filename in (("raw_3c_hex", "flicker_params.bin"),
+                              ("raw_3a_hex", "flicker_waveform.bin")):
+            with open(os.path.join(destination, filename), "wb") as stream:
+                stream.write(bytes.fromhex(attempt[key]))
+        with open(os.path.join(destination, "flicker_waveform.csv"), "w") as stream:
+            stream.write("sample,value\n")
+            for i, value in enumerate(attempt["waveform"]["samples"]):
+                stream.write(f"{i},{value}\n")
+        with open(os.path.join(destination, "attempt.json"), "w") as stream:
+            json.dump(attempt, stream, indent=2, allow_nan=False)
+    temporary = os.path.join(folder, "flicker.json.tmp")
+    with open(temporary, "w") as stream:
+        json.dump(record, stream, indent=2, allow_nan=False)
+    os.replace(temporary, os.path.join(folder, "flicker.json"))
+
+
+async def _flicker(address, outdir=None, auto_settings=False, continuous=False):
+    """Auto-first adaptive capture; never discard a failed or rejected attempt."""
+    from bleak import BleakClient
     if not address:
         hits = await _scan()
         if not hits:
             print("no HPCS device found", file=sys.stderr)
             return 2
         address = hits[0].address
-        print(f"connecting {address}")
-
     rx = _Rx()
     async with BleakClient(address, timeout=20.0) as client:
         await client.start_notify(CHAR_UUID, rx.on_notify)
 
         async def send(frame):
-            vlog(f"TX      {_hex(frame)}")
+            vlog("TX", _hex(frame))
             await client.write_gatt_char(CHAR_UUID, frame, response=False)
 
-        async def wait_prefix(prefix, timeout=3.0):
-            end = asyncio.get_event_loop().time() + timeout
-            while asyncio.get_event_loop().time() < end:
-                c = await rx.next_chunk(end - asyncio.get_event_loop().time())
-                if c and c.startswith(prefix):
-                    return c
-            return None
+        async def request(frame, size=None, timeout=3.0, progress=None):
+            rx.reset()
+            await send(frame)
+            received = b""
+            end = asyncio.get_running_loop().time() + timeout
+            while asyncio.get_running_loop().time() < end:
+                chunk = await rx.next_chunk(end - asyncio.get_running_loop().time())
+                if not chunk:
+                    break
+                if not received and not chunk.startswith(frame[:2]):
+                    continue
+                received += chunk
+                if progress:
+                    progress(received)
+                if size is None or len(received) >= size:
+                    break
+            return received
 
+        async def config():
+            result = {}
+            for label, command in (("gain_mode", CMD_FLICK_GEAR_MODE),
+                                   ("gain_index", CMD_FLICK_GEAR),
+                                   # 8C3F is read by the APK, but it is not a
+                                   # validated echo of the 8C41 argument. Preserve
+                                   # the byte as an opaque status observation.
+                                   ("rate_status_3f", CMD_FLICK_RATE_MODE),
+                                   ("rate_index", CMD_FLICK_SPEED)):
+                raw = await request(command, 3)
+                result[label] = raw[2] if len(raw) == 3 else None
+                result[label + "_raw_hex"] = raw.hex()
+            return result
+
+        folder = outdir or ("HPCS_flicker_" + time.strftime('%Y%m%d-%H%M%S'))
+        if os.path.exists(os.path.join(folder, "flicker.json")) or \
+                (os.path.isdir(folder) and any(n.startswith("attempt_") for n in os.listdir(folder))):
+            raise ValueError("output folder already contains flicker evidence; choose a fresh --out")
+        record = {"schema_version": 2, "address": address,
+                  "captured_at": time.strftime('%Y-%m-%dT%H:%M:%S'),
+                  "automatic_gain_requested": True, "automatic_rate_requested": auto_settings,
+                  "continuous_mode_requested": continuous,
+                  "start_command": "8c0e04" if continuous else "8c0e03",
+                  "attempts": [], "accepted_attempt": None, "status": "in_progress"}
+        initial = None
+        changed = False
         try:
-            # Device identity.
-            rx.reset(); await send(CMD_INFO)
-            info_frame = await wait_prefix(b"\x8c\xee")
-            info = decode_info(info_frame) if info_frame else {
-                "name":"", "sn":None, "iVer":0, "battery":None, "type":0}
-            print(f"device : {info['name']}  sn={info['sn']}  fw={info['iVer']}")
-
-            # Match the manufacturer app's automatic flicker settings when requested.
-            if auto_settings:
-                rx.reset(); await send(CMD_FLICK_GEAR_AUTO)
+            raw = await request(CMD_INFO, 20)
+            record["device"] = decode_info(raw) if len(raw) >= 20 else {}
+            if continuous and record["device"].get("iVer", 0) < 2007:
+                raise ValueError("continuous mode requires verified firmware >=2007")
+            initial = await config()
+            record["initial_config"] = initial
+            if initial["gain_mode"] not in (0, 1) or initial["gain_index"] not in range(4) \
+                    or initial["rate_status_3f"] not in (0, 1) or initial["rate_index"] not in range(11):
+                raise ValueError("initial configuration incomplete; cannot safely restore settings")
+            gain = None
+            for number in range(1, 5):
+                attempt = {"number": number, "requested_gain_mode": "auto" if gain is None else "manual",
+                           "requested_gain_index": gain,
+                           "requested_gain_multiplier": None if gain is None else 10 ** gain,
+                           "raw_3c_hex": "", "raw_3a_hex": "", "metrics": None,
+                           "waveform": flicker_waveform_diagnostics([]),
+                           "decision": {"action": "reject", "reason": "attempt incomplete"}}
+                record["attempts"].append(attempt)
+                save_flicker_evidence(folder, record)
+                changed = True
+                await send(CMD_STOP)
                 await asyncio.sleep(0.15)
-                rx.reset(); await send(CMD_FLICK_RATE_AUTO)
+                await request(bytes([0x8c, 0x37, 1 if gain is None else 0]))
+                if gain is not None:
+                    await request(bytes([0x8c, 0x35, gain]))
+                if number == 1 and auto_settings:
+                    await request(CMD_FLICK_RATE_AUTO)
                 await asyncio.sleep(0.15)
+                attempt["config_before"] = await config()
+                before = attempt["config_before"]
+                if before["gain_mode"] != (1 if gain is None else 0) or \
+                        before["gain_index"] not in range(4) or \
+                        (gain is not None and before["gain_index"] != gain) or \
+                        before["rate_status_3f"] not in (0, 1) or before["rate_index"] not in range(11):
+                    raise ValueError("requested settings not confirmed by readback")
+                attempt.update(flicker_sampling_metadata(before["rate_index"]))
+                save_flicker_evidence(folder, record)
+                start_command = CMD_FLICK_START_CONTINUOUS if continuous else CMD_FLICK_START
+                start_ack = await request(start_command)
+                attempt["start_ack_hex"] = start_ack.hex()
+                # The 310P returns a bare two-byte 8C 0E acknowledgement. The
+                # queue was reset immediately before this write and request()
+                # accepts only this command prefix, so this preserves the stale-
+                # result guard without inventing a payload byte requirement.
+                if start_ack[:2] != start_command[:2]:
+                    raise TimeoutError("missing flicker start acknowledgement; refusing stale result")
+                if continuous:
+                    await asyncio.sleep(0.2)
+                    attempt["battery_status_hex"] = (await request(CMD_BATT, timeout=1)).hex()
+                    await asyncio.sleep(0.8)
+                # Wait at least the configured window; a ready bit may be stale
+                # immediately after start. Allow the longest APK window as well.
+                await asyncio.sleep(attempt["acquisition_window_ms"] / 1000)
+                ready = False
+                for _ in range(200):
+                    state = await request(CMD_FLICK_STATE, 3, timeout=1)
+                    attempt["last_state_hex"] = state.hex()
+                    if len(state) == 3 and state[2] == 1:
+                        ready = True
+                        break
+                    await asyncio.sleep(0.1)
+                if not ready:
+                    raise TimeoutError("flicker acquisition never became ready")
 
-            # Sampling-speed index used by the official Android app.
-            rx.reset(); await send(CMD_FLICK_SPEED)
-            speed_frame = await wait_prefix(b"\x8c\x3d")
-            speed_index = speed_frame[2] if speed_frame and len(speed_frame) >= 3 else None
-            speed_value = (FLICK_SPEEDS[speed_index]
-                           if speed_index is not None and speed_index < len(FLICK_SPEEDS)
-                           else None)
+                def retain(key):
+                    def update(raw):
+                        attempt[key] = raw.hex()
+                        if key == "raw_3a_hex":
+                            count = min(400, max(0, (len(raw) - 2) // 2))
+                            samples = list(struct.unpack_from(f"<{count}H", raw, 2)) if count else []
+                            attempt["waveform"] = flicker_waveform_diagnostics(samples)
+                    return update
 
-            # Dedicated flicker acquisition.
-            rx.reset(); await send(CMD_FLICK_START)
-            await wait_prefix(b"\x8c\x0e")
-            ready = False
-            for _ in range(200):
-                rx.reset(); await send(CMD_FLICK_STATE)
-                st = await wait_prefix(b"\x8c\x3b", 1.0)
-                if st and len(st) >= 3 and st[2] == 1:
-                    ready = True
-                    break
-                await asyncio.sleep(0.1)
-            if not ready:
-                print("flicker sample never became ready", file=sys.stderr)
-                return 3
-
-            # Calculated parameters: four LE float32 values after 8C 3C.
-            rx.reset(); await send(CMD_FLICK_PARAMS)
-            params = await wait_prefix(b"\x8c\x3c")
-            if not params or len(params) < 18:
-                print("incomplete flicker parameter response", file=sys.stderr)
-                return 4
-            freq, percent, index, cycle_ms = struct.unpack_from("<4f", params, 2)
-
-            # Waveform: 8C 3A + 400 uint16 LE samples = 802 bytes.
-            rx.reset(); await send(CMD_FLICK_WAVE)
-            wave = b""
-            end = asyncio.get_event_loop().time() + 8.0
-            while len(wave) < 802 and asyncio.get_event_loop().time() < end:
-                c = await rx.next_chunk(min(2.0, end - asyncio.get_event_loop().time()))
-                if not c:
-                    break
-                if not wave:
-                    if not c.startswith(b"\x8c\x3a"):
-                        continue
-                wave += c
-            if len(wave) < 802:
-                print(f"incomplete flicker waveform: got {len(wave)} of 802 bytes",
-                      file=sys.stderr)
-                return 5
-            wave = wave[:802]
-            samples = list(struct.unpack_from("<400H", wave, 2))
-
-            folder = outdir or (
-                f"{_sanitize(info.get('name'))}_{info.get('sn') or 'unknown'}"
-                f"_flicker_{time.strftime('%Y%m%d-%H%M%S')}")
-            os.makedirs(folder, exist_ok=True)
-            open(os.path.join(folder, "flicker_params.bin"), "wb").write(params)
-            open(os.path.join(folder, "flicker_waveform.bin"), "wb").write(wave)
-            with open(os.path.join(folder, "flicker_waveform.csv"), "w") as f:
-                f.write("sample,value\n")
-                for i, value in enumerate(samples):
-                    f.write(f"{i},{value}\n")
-            record = {
-                "device": info,
-                "address": address,
-                "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "automatic_settings_requested": auto_settings,
-                "sampling_speed_index": speed_index,
-                "sampling_speed_value": speed_value,
-                "metrics": {
-                    "frequency_hz": freq,
-                    "flicker_percent": percent,
-                    "flicker_index": index,
-                    "flicker_cycle_ms": cycle_ms,
-                },
-                "waveform": {"sample_count": len(samples), "samples": samples},
-            }
-            with open(os.path.join(folder, "flicker.json"), "w") as f:
-                json.dump(record, f, indent=2)
-            print(f"flicker: {freq:.3f} Hz  {percent:.3f}%  "
-                  f"index={index:.5f}  cycle={cycle_ms:.3f} ms")
-            print(f"wrote flicker evidence -> {folder}/")
-            return 0
+                params = await request(CMD_FLICK_PARAMS, 18, progress=retain("raw_3c_hex"))
+                if len(params) == 18:
+                    values = struct.unpack_from("<4f", params, 2)
+                    attempt["metrics"] = dict(zip(("frequency_hz", "flicker_percent",
+                        "flicker_index", "flicker_cycle_ms"), values)) if all(map(math.isfinite, values)) else None
+                    if not all(map(math.isfinite, values)):
+                        attempt["metric_decode_error"] = "non-finite float32; raw response retained"
+                wave = await request(CMD_FLICK_WAVE, 802, timeout=8, progress=retain("raw_3a_hex"))
+                if len(wave) != 802:
+                    attempt["waveform"].update(viable=False, reason="incorrect waveform frame length")
+                attempt["config_after"] = await config()
+                actual = attempt["config_after"]
+                attempt.update(flicker_sampling_metadata(actual["rate_index"]))
+                if actual["gain_mode"] != before["gain_mode"] or actual["gain_index"] not in range(4) \
+                        or (gain is not None and actual["gain_index"] != gain) \
+                        or actual["rate_status_3f"] != before["rate_status_3f"] or actual["rate_index"] not in range(11) \
+                        or (before["rate_index"] != actual["rate_index"]):
+                    attempt["decision"] = {"action": "reject", "reason": "invalid post-acquisition configuration readback"}
+                else:
+                    attempt["decision"] = flicker_decision(attempt["metrics"], attempt["waveform"],
+                                                           actual["gain_index"], gain)
+                await send(CMD_STOP)
+                decision = attempt["decision"]
+                print(f"attempt {number}: {decision['action']} — {decision['reason']}")
+                if decision["action"] == "accept":
+                    record["accepted_attempt"] = number
+                    record["metrics"] = attempt["metrics"]
+                    record["status"] = "accepted"
+                elif decision["action"] == "reject":
+                    record["status"] = "rejected"
+                save_flicker_evidence(folder, record)
+                if decision["action"] != "retry":
+                    return 0 if decision["action"] == "accept" else 6
+                gain = decision["next_gain_index"]
+            record["status"] = "rejected"
+            return 6
+        except BaseException as error:
+            record["status"] = "error"
+            record["error"] = f"{type(error).__name__}: {error}"
+            if record["attempts"]:
+                record["attempts"][-1]["decision"] = {"action": "reject", "reason": record["error"]}
+            raise
         finally:
+            async def cleanup():
+                results = []
+                commands = [CMD_STOP]
+                if changed and initial:
+                    commands += [bytes([0x8c, 0x37, 0]), bytes([0x8c, 0x35, initial["gain_index"]]),
+                                 bytes([0x8c, 0x37, initial["gain_mode"]])]
+                    if auto_settings:
+                        commands += [bytes([0x8c, 0x41, 0]), bytes([0x8c, 0x3e, initial["rate_index"]]),
+                                     # The original 8C3F byte remains the legacy
+                                     # restore convention; its semantics are recorded
+                                     # as unresolved rather than treated as verified.
+                                     bytes([0x8c, 0x41, initial["rate_status_3f"]])]
+                for command in commands:
+                    try:
+                        await send(command)
+                        await asyncio.sleep(0.15)
+                        results.append({"command": command.hex(), "sent": True})
+                    except Exception as error:
+                        results.append({"command": command.hex(), "error": str(error)})
+                record["cleanup"] = results
+                try:
+                    record["restored_config"] = await config()
+                    restored = record["restored_config"]
+                    record["restoration_verified"] = bool(initial) and all(
+                        restored[k] == initial[k] for k in ("gain_mode", "rate_status_3f")) and \
+                        (initial["gain_mode"] == 1 or restored["gain_index"] == initial["gain_index"]) and \
+                        restored["rate_index"] == initial["rate_index"]
+                except Exception as error:
+                    record["restoration_verified"] = False
+                    record["cleanup_error"] = str(error)
+            task = asyncio.create_task(cleanup())
             try:
-                await asyncio.shield(send(CMD_STOP))
-            except BaseException:
-                pass
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
+            finally:
+                save_flicker_evidence(folder, record)
+                print(f"wrote all flicker attempts -> {folder}")
+                if not record.get("restoration_verified"):
+                    print("WARNING: settings restoration not verified; inspect flicker.json", file=sys.stderr)
 
 
 # ----------------------------------------------------------------------------
@@ -962,7 +1154,9 @@ def main(argv=None):
     fli.add_argument("--address", help="BLE MAC/address (default: first HPCS* found)")
     fli.add_argument("--out", help="output folder")
     fli.add_argument("--auto", action="store_true",
-                     help="enable the official app automatic gear and sample-rate settings before capture")
+                     help="request automatic sample rate; adaptive capture always starts with Auto gain")
+    fli.add_argument("--continuous", action="store_true",
+                     help="use the official firmware >=2007 continuous flicker start command 0x8C0E04")
 
     m = sub.add_parser("measure", parents=[parent],
                        help="connect, measure, dump a full result folder")
@@ -997,7 +1191,7 @@ def main(argv=None):
         return asyncio.run(_measure(args.address, args.lx, args.out,
                                     args.no_plot, args.confirm)) or 0
     if args.cmd == "flicker":
-        return asyncio.run(_flicker(args.address, args.out, args.auto)) or 0
+        return asyncio.run(_flicker(args.address, args.out, args.auto, args.continuous)) or 0
     if args.cmd == "quality":
         out, payload = write_derived_metrics(args.measurement, args.out, args.ssi_reference)
         dm = payload["derived_metrics"]
