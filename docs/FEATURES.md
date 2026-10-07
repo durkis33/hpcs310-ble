@@ -27,6 +27,21 @@ A successful experiment does not by itself make a software feature Verified.
 | Replayable raw captures | Accepted | Permit calculation/software testing from stored raw captures without requiring the physical instrument. |
 | EVERFINE-style graphical report | Accepted | Generate a reproducible graphical measurement sheet from stored raw evidence without replacing or altering the raw record. |
 
+## Source stability profiling
+
+| Feature | Status | Requirement |
+| --- | --- | --- |
+| General 30-second Source Stability Profile | Accepted | Provide an approximately 30-second per-operating-condition characterisation window that measures not only temporal flicker behaviour but the consistency of all optical metrics that can be meaningfully resampled at their appropriate cadence. |
+| Timestamped multi-rate acquisition | Accepted | Use a common timeline while allowing each measurement family to run at the fastest sensible cadence supported by its acquisition/integration overhead. Do not require spectral, derived-colour and high-rate temporal measurements to share an artificial common sample rate. |
+| Optical consistency traces | Accepted | Where supported, plot and retain time series for output/illuminance, CCT, Duv, chromaticity coordinates, SPD/spectral shape and relevant colour-rendering metrics such as CRI/R values including R9. Derived metrics from one spectrum remain linked to that source spectrum rather than treated as independent observations. |
+| Stability statistics | Accepted | For each suitable metric report its time series plus appropriate summary statistics such as mean/median, min/max, standard deviation, range and drift/slope, while retaining the underlying observations. |
+| Cross-metric consistency | Accepted | Keep spectral, photometric and temporal observations on the same timestamped run so changes in output, chromaticity, spectrum and flicker can be compared rather than assessed as unrelated tests. |
+| Per-condition qualification | Accepted | A Source Stability Profile describes the DUT only at the tested operating state. Material changes in drive level, PWM setting, channel recipe, power state or other relevant conditions require another profile when that state is being qualified. |
+| Short stability versus warm-up drift | Accepted | Treat the approximately 30-second profile as short-window repeatability/variability characterisation. Provide a separate longer-duration warm-up/thermal-drift regime for movement toward equilibrium; a stable 30-second window must not be represented as proof of long-term thermal stability. |
+| Metric-specific qualification criteria | Accepted | Stability criteria may differ by measurement family and must be explicit/versioned when used for automatic pass/fail. Do not invent one universal threshold across CCT, Duv, output, spectral shape and flicker. |
+
+The flicker temporal-stability gate below is one specialised measurement family within the broader Source Stability Profile. Its independent high-rate waveform slices remain subject to the additional non-contiguity and phase-reconstruction rules described there.
+
 ## Flicker and temporal measurement
 
 | Feature | Status | Requirement |
