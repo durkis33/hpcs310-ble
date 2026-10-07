@@ -70,3 +70,24 @@ the next physical run and does not change HPCS-005's decision policy.
 Raw capture directories are intentionally excluded from Git. They remain the
 source evidence for experimental records and must be banked separately after a
 completed physical sequence.
+
+
+## Temporal-stability qualification gate — 2026-10-07
+
+A flicker frequency must not be promoted to a representative property of the device under test from a single exposed 400-sample block alone.
+
+For each materially distinct DUT operating condition being qualified, the software requirement is to begin with an approximately 30-second autonomous multi-slice observation using independent timestamped `8C3A` captures. The observation record must preserve wall-clock duration, slice count, sample rate, exposed waveform duration per slice and total actual sampled exposure.
+
+Across that observation, software assesses frequency behaviour, modulation depth and waveform-shape repeatability. If the source demonstrates sufficiently stable periodic behaviour under explicit, versioned criteria, the independent slices may be phase-aligned to form a higher-confidence **phase-reconstructed/composite waveform**. Such a result must never be described as a continuous recording because the exposed 400-sample blocks contain real-time gaps.
+
+If stability/repeatability is insufficient, the software must not force a single representative flicker frequency and must not manufacture a composite waveform. It instead reports temporal variability and preserves per-slice results/distributions.
+
+The numerical pass/fail criteria are not yet fixed. They must be calibrated and validated against controlled sources with known flicker frequency/modulation before automatic qualification depends on them. The fly-zapper dataset demonstrates why the gate is required; it is not itself a calibration source for the final thresholds.
+
+### Physical evidence informing the requirement
+
+A 2026-10-07 continuous-mode BLE run produced 54 unique 400-sample slices at 20 kHz over 31.1125 seconds, representing 1.080 seconds of actual sampled waveform exposure distributed across the wall-clock run.
+
+This dataset did not support a defensible phase composite. Blind dominant-frequency estimates were unstable and mean slice-to-composite correlation was approximately 0.19. The approximately 250 Hz component observed strongly and repeatably in earlier captures was tested directly in the 54-slice run: fitted 250 Hz sinusoidal amplitude averaged about 0.090% of mean light level, mean fit correlation was about 0.080, and 250 Hz was the strongest non-DC Fourier bin in 0 of 54 slices.
+
+Therefore the earlier approximately 250 Hz result remains evidence for that earlier operating state, but the later run shows it cannot be assumed to be a persistent characteristic of the source. This is the basis for the temporal-stability qualification gate.
